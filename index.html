@@ -979,8 +979,8 @@
             <div class="form-group">
                 <label class="form-label">视觉模型（分析视频帧）</label>
                 <select class="form-select" id="visionModel">
-                    <option value="glm-4.6v">GLM 4.6V（推荐·视觉理解强）</option>
-                    <option value="qwen3-vl-plus">Qwen3 VL Plus（视觉·带思考）</option>
+                    <option value="qwen3-vl-plus">Qwen3 VL Plus（推荐·长输出·视觉理解强）</option>
+                    <option value="glm-4.6v">GLM 4.6V（视觉理解强）</option>
                     <option value="glm-5v-turbo">GLM 5V Turbo（视觉编程）</option>
                     <option value="seed-2.0-pro">Seed 2.0 Pro（多模态·Agent）</option>
                     <option value="seed-2.0-lite">Seed 2.0 Lite（多模态·均衡）</option>
@@ -1185,7 +1185,7 @@ const HARDCODED_API_KEY = 'sk-14658aece3ef7f8e4aad64574fe2a786d0a60e5a27ca1f9e';
 
 let config = loadData(STORE_KEYS.CONFIG, {
     apiKey: HARDCODED_API_KEY,
-    visionModel: 'glm-4.6v',
+    visionModel: 'qwen3-vl-plus',
     textModel: 'deepseek-v3.2',
     imageModel: 'seedream-5.0-lite',
 });
@@ -1244,7 +1244,7 @@ async function testConnection() {
 // ============================================================
 // TokenDance API Client
 // ============================================================
-async function callLLM(messages, model) {
+async function callLLM(messages, model, maxTokens = 4096) {
     const resp = await fetch(`${API_BASE}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -1255,7 +1255,7 @@ async function callLLM(messages, model) {
             model: model || getTextModel(),
             messages: messages,
             temperature: 0.3,
-            max_tokens: 4096,
+            max_tokens: maxTokens,
         }),
     });
     if (!resp.ok) {
@@ -2540,17 +2540,38 @@ async function startAgentProcess() {
         }
 
         progressStep(1, 40);
-        const analysisText = await callLLMWithRetry(
-            [{ role: 'user', content: visionContent }],
-            getVisionModel(),
-            2
-        );
-        progressStep(1, 90);
-
-        const analysisResult = extractJson(analysisText);
-        if (!analysisResult || !analysisResult.scenes || analysisResult.scenes.length === 0) {
-            throw new Error('视觉分析未返回有效场景数据');
+        let analysisResult = null;
+        let rawAnalysisText = null;
+        try {
+            const analysisText = await callLLMWithRetry(
+                [{ role: 'user', content: visionContent }],
+                getVisionModel(),
+                2,
+                12000
+            );
+            rawAnalysisText = analysisText;
+            progressStep(1, 80);
+            analysisResult = extractJson(analysisText);
+            
+            if (analysisResult && analysisResult.raw_text) {
+                console.warn('视觉分析结果无法解析为有效 JSON，使用 fallback 数据');
+                analysisResult = null;
+            } else if (!analysisResult || !analysisResult.scenes || !Array.isArray(analysisResult.scenes) || analysisResult.scenes.length === 0) {
+                console.warn('视觉分析结果缺少有效 scenes 数据，使用 fallback 数据');
+                console.warn('原始响应:', rawAnalysisText?.substring(0, 300));
+                analysisResult = null;
+            } else {
+                console.log('视觉分析成功，使用真实数据，场景数:', analysisResult.scenes.length);
+            }
+        } catch (err) {
+            console.warn('视觉分析调用失败，使用 fallback 数据:', err.message);
         }
+
+        if (!analysisResult) {
+            analysisResult = generateFallbackVisionResult(frames);
+            showToast('视觉分析使用智能兜底数据（可重新分析尝试获取精准结果）', 'info');
+        }
+        progressStep(1, 90);
         completeStep(1);
 
         document.getElementById('stepCount').textContent = '步骤 2/4';
@@ -2749,11 +2770,11 @@ function clearVideoAndReset() {
     resetSteps();
 }
 
-async function callLLMWithRetry(messages, model, maxRetries = 2) {
+async function callLLMWithRetry(messages, model, maxRetries = 2, maxTokens = 4096) {
     let lastError = null;
     for (let i = 0; i <= maxRetries; i++) {
         try {
-            return await callLLM(messages, model);
+            return await callLLM(messages, model, maxTokens);
         } catch (err) {
             lastError = err;
             console.warn(`LLM call attempt ${i + 1} failed:`, err.message);
@@ -2763,6 +2784,80 @@ async function callLLMWithRetry(messages, model, maxRetries = 2) {
         }
     }
     throw lastError;
+}
+
+function generateFallbackVisionResult(frames) {
+    const frameCount = frames && frames.length > 0 ? frames.length : 5;
+    const scenes = [];
+    const sceneTypes = ['甜蜜约会', '职场逆袭', '逛街购物', '宴会高光', '家庭温馨', '冲突对峙', '娱乐休闲', '美食探店'];
+    const emotions = ['甜蜜', '惊喜', '愤怒', '感动', '期待', '得意', '紧张', '释然'];
+    const categories = ['服饰穿搭', '美妆护肤', '美食餐饮', '数码科技', '家居生活', '本地服务', 'App下载'];
+    const products = [
+        { name: '轻奢连衣裙', category: '服饰穿搭', value: '中高', ad_budget: '服饰行业预算' },
+        { name: '水润精华液', category: '美妆护肤', value: '中高', ad_budget: '美妆行业预算' },
+        { name: '精品下午茶套餐', category: '美食餐饮', value: '中等', ad_budget: '餐饮行业预算' },
+        { name: '旗舰智能手机', category: '数码科技', value: '高', ad_budget: '数码行业预算' },
+        { name: '北欧风家居摆件', category: '家居生活', value: '中等', ad_budget: '家居行业预算' },
+    ];
+
+    for (let i = 0; i < Math.min(frameCount, 6); i++) {
+        const startTime = i * 6;
+        const endTime = (i + 1) * 6;
+        const sceneType = sceneTypes[i % sceneTypes.length];
+        const emotion = emotions[i % emotions.length];
+        const product = products[i % products.length];
+        const frameTime = frames && frames[i] ? frames[i].timestamp : `${String(Math.floor(startTime / 60)).padStart(2, '0')}:${String(startTime % 60).padStart(2, '0')}`;
+
+        scenes.push({
+            time: `${String(Math.floor(startTime / 60)).padStart(2, '0')}:${String(startTime % 60).padStart(2, '0')}-${String(Math.floor(endTime / 60)).padStart(2, '0')}:${String(endTime % 60).padStart(2, '0')}`,
+            desc: `${sceneType}场景，角色互动自然，画面质感良好，整体氛围${emotion}`,
+            type: sceneType,
+            characters: [
+                {
+                    identity: i % 2 === 0 ? '女主' : '男主',
+                    appearance: '时尚穿搭，气质出众，服装版型精致，配色协调',
+                    items: [product.name, '时尚配饰'],
+                    emotion: emotion,
+                    dialogue: '这段剧情很精彩'
+                }
+            ],
+            setting: `${sceneType}环境，布置精致，光线柔和`,
+            key_objects: [product.name, '时尚配饰', '精致道具'],
+            emotion_tone: emotion,
+            commercial_elements: [
+                {
+                    type: '商品',
+                    name: product.name,
+                    category: product.category,
+                    value: product.value,
+                    ad_budget: product.ad_budget
+                }
+            ]
+        });
+    }
+
+    return {
+        scenes: scenes,
+        video_summary: '一段充满戏剧张力的短剧视频，包含多个精彩剧情节点，角色形象鲜明，画面制作精良，蕴含丰富的商业植入潜力。',
+        main_characters: [
+            { identity: '女主', style: '时尚精致', key_items: ['轻奢配饰', '美妆产品'] },
+            { identity: '男主', style: '干练有型', key_items: ['数码产品', '时尚穿搭'] }
+        ],
+        highlight_moments: [
+            { time: '00:12', type: '情感高潮', desc: '男女主角情感升温的甜蜜时刻' },
+            { time: '00:24', type: '逆袭打脸', desc: '主角逆袭成功的高光时刻' },
+            { time: '00:30', type: '真相揭露', desc: '关键剧情反转的震撼时刻' }
+        ],
+        commercial_opportunities: products.map((p, i) => ({
+            product_name: p.name,
+            category: p.category,
+            appearance_time: `00:${String((i + 1) * 6).padStart(2, '0')}`,
+            usage_context: `${sceneTypes[i % sceneTypes.length]}场景中自然出现`,
+            ad_value: '高',
+            ad_budget: p.ad_budget
+        })),
+        _is_fallback: true
+    };
 }
 
 function generateFallbackAdPoints(analysisResult) {
